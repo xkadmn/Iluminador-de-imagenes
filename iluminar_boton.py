@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 =====================================================================
- ILUMINAR BOTON  (ovalo / rectangulo / pincel)  -  rapido + opciones
+ ILUMINAR BOTON  (ovalo / rectangulo / redondeado / pincel)
 =====================================================================
 
 Que hace:
@@ -16,9 +16,12 @@ COMO USARLO
 1) Instala Pillow una vez:   pip install Pillow
 2) Pone este archivo junto a tu imagen y escribi su nombre en ARCHIVO.
 3) Ejecutalo (doble clic, o  python iluminar_boton.py ).
-4) Teclas de modo:  O ovalo   R rectangulo   P pincel
+4) Teclas de modo:  O ovalo   R rectangulo   C cuadrado redondeado   P pincel
    Arrastra para marcar. Z deshacer  B borrar  G/Enter guardar  Esc salir
-   +/- grosor del pincel (solo modo pincel)
+   +/- grosor del pincel (modo pincel)
+   +/- radio de las esquinas (modo cuadrado redondeado, tambien
+       mientras arrastras: ves el cambio en vivo)
+       0% = esquinas rectas ... 100% = maximo redondeo (circulo/pastilla)
 5) Guarda un archivo terminado en "_iluminado.png".
 
 --------------------------------------------------------------------
@@ -39,6 +42,7 @@ COMO USARLO
 --------------------------------------------------------------------
 """
 
+import math
 import tkinter as tk
 from tkinter import messagebox
 from PIL import Image, ImageFilter, ImageDraw, ImageChops, ImageTk
@@ -66,6 +70,10 @@ NITIDO_CENTRO  = 6
 RADIO_ESQUINA  = 14
 PINCEL_INICIAL = 30
 
+# ---- modo cuadrado redondeado ----
+RADIO_PCT_INICIAL = 30   # radio de esquina inicial, en % (0 = recto, 100 = maximo)
+RADIO_PCT_PASO    = 10   # cuanto cambia con cada +/-
+
 # colores de halo disponibles
 COLORES_HALO = {
     "suave":    (252, 250, 205),
@@ -79,6 +87,13 @@ MAX_ALTO_VENTANA  = 800
 # =====================================================================
 #  EFECTO
 # =====================================================================
+def radio_desde_pct(caja, pct):
+    """Convierte el % elegido en radio en pixeles para esa caja.
+    100% = la mitad del lado mas corto (circulo o forma de pastilla)."""
+    x0, y0, x1, y1 = caja
+    return (pct / 100.0) * min(x1 - x0, y1 - y0) / 2.0
+
+
 def construir_mascara(marcas, size):
     W, H = size
     m = Image.new("L", (W, H), 0)
@@ -88,6 +103,9 @@ def construir_mascara(marcas, size):
             d.ellipse(mk["caja"], fill=255)
         elif mk["tipo"] == "rectangulo":
             d.rounded_rectangle(mk["caja"], radius=RADIO_ESQUINA, fill=255)
+        elif mk["tipo"] == "redondeado":
+            r = radio_desde_pct(mk["caja"], mk["radio_pct"])
+            d.rounded_rectangle(mk["caja"], radius=r, fill=255)
         elif mk["tipo"] == "pincel":
             r = mk["r"]; pts = mk["puntos"]
             for (x, y) in pts:
@@ -130,6 +148,9 @@ def aplicar_efecto(original, marcas, halo=None, halo_tamano=None, fondo_estilo=N
             d.ellipse(mk["caja"], outline=COLOR_BORDE, width=GROSOR_BORDE)
         elif mk["tipo"] == "rectangulo":
             d.rounded_rectangle(mk["caja"], radius=RADIO_ESQUINA, outline=COLOR_BORDE, width=GROSOR_BORDE)
+        elif mk["tipo"] == "redondeado":
+            r = radio_desde_pct(mk["caja"], mk["radio_pct"])
+            d.rounded_rectangle(mk["caja"], radius=r, outline=COLOR_BORDE, width=GROSOR_BORDE)
         elif mk["tipo"] == "pincel":
             solo = construir_mascara([mk], original.size)
             grande = solo.filter(ImageFilter.MaxFilter(GROSOR_BORDE*2+1))
@@ -137,6 +158,24 @@ def aplicar_efecto(original, marcas, halo=None, halo_tamano=None, fondo_estilo=N
             res = Image.composite(Image.new("RGB", (W, H), COLOR_BORDE), res, anillo)
             d = ImageDraw.Draw(res)
     return res
+
+
+def _puntos_redondeado(x0, y0, x1, y1, r, pasos=10):
+    """Puntos del contorno de un rectangulo redondeado, para dibujarlo
+    en el canvas de tkinter (que no tiene esa forma de fabrica)."""
+    r = max(0.0, min(r, (x1 - x0) / 2.0, (y1 - y0) / 2.0))
+    esquinas = [
+        (x1 - r, y0 + r, -90),   # arriba-derecha
+        (x1 - r, y1 - r,   0),   # abajo-derecha
+        (x0 + r, y1 - r,  90),   # abajo-izquierda
+        (x0 + r, y0 + r, 180),   # arriba-izquierda
+    ]
+    pts = []
+    for cx, cy, a0 in esquinas:
+        for i in range(pasos + 1):
+            a = math.radians(a0 + 90.0 * i / pasos)
+            pts += [cx + r * math.cos(a), cy + r * math.sin(a)]
+    return pts
 
 
 # =====================================================================
@@ -156,6 +195,7 @@ def main():
     vista = original.resize((disp_w, disp_h))
 
     estado = {"modo": "ovalo", "pincel": PINCEL_INICIAL,
+              "radio_pct": RADIO_PCT_INICIAL, "ultimo": None,
               "arrastrando": False, "ini": None, "puntos_pincel": [],
               "halo": HALO, "halo_tamano": HALO_TAMANO, "fondo": FONDO}
     marcas = []
@@ -180,18 +220,23 @@ def main():
     root.fondo_tk = fondo_tk
 
     def actualizar_barra():
-        nombres = {"ovalo": "OVALO", "rectangulo": "RECTANGULO", "pincel": "PINCEL"}
-        t = "  Modo: %s   |   O R P modo  Z deshacer  B borrar  G/Enter guardar  Esc salir" % (
+        nombres = {"ovalo": "OVALO", "rectangulo": "RECTANGULO",
+                   "redondeado": "CUADRADO REDONDEADO", "pincel": "PINCEL"}
+        t = "  Modo: %s   |   O R C P modo  Z deshacer  B borrar  G/Enter guardar  Esc salir" % (
             nombres[estado["modo"]])
         if estado["modo"] == "pincel":
             t += "   |   pincel %d (+/-)" % estado["pincel"]
+        elif estado["modo"] == "redondeado":
+            t += "   |   radio esquina %d%% (+/-)" % estado["radio_pct"]
         barra.config(text=t)
 
     def escalar(mk, f):
         n = {"tipo": mk["tipo"]}
-        if mk["tipo"] in ("ovalo", "rectangulo"):
+        if mk["tipo"] in ("ovalo", "rectangulo", "redondeado"):
             x0, y0, x1, y1 = mk["caja"]
             n["caja"] = (x0*f, y0*f, x1*f, y1*f)
+            if mk["tipo"] == "redondeado":
+                n["radio_pct"] = mk["radio_pct"]
         else:
             n["r"] = mk["r"]*f
             n["puntos"] = [(x*f, y*f) for (x, y) in mk["puntos"]]
@@ -217,9 +262,23 @@ def main():
     def a_real(x, y):
         return (x/escala, y/escala)
 
+    def dibujar_preview_caja(ex, ey):
+        limpiar_preview()
+        ix, iy = estado["ini"]
+        x0, x1 = sorted((ix, ex)); y0, y1 = sorted((iy, ey))
+        if estado["modo"] == "ovalo":
+            preview_ids.append(canvas.create_oval(x0, y0, x1, y1, outline=_hex(COLOR_BORDE), width=2))
+        elif estado["modo"] == "redondeado":
+            r = radio_desde_pct((x0, y0, x1, y1), estado["radio_pct"])
+            preview_ids.append(canvas.create_polygon(_puntos_redondeado(x0, y0, x1, y1, r),
+                                                     outline=_hex(COLOR_BORDE), fill="", width=2))
+        else:
+            preview_ids.append(canvas.create_rectangle(x0, y0, x1, y1, outline=_hex(COLOR_BORDE), width=2))
+
     def presionar(ev):
         estado["arrastrando"] = True
         estado["ini"] = (ev.x, ev.y)
+        estado["ultimo"] = (ev.x, ev.y)
         if estado["modo"] == "pincel":
             r = estado["pincel"]
             preview_ids.append(canvas.create_oval(ev.x-r, ev.y-r, ev.x+r, ev.y+r,
@@ -229,6 +288,7 @@ def main():
     def mover(ev):
         if not estado["arrastrando"]:
             return
+        estado["ultimo"] = (ev.x, ev.y)
         if estado["modo"] == "pincel":
             r = estado["pincel"]
             x0, y0 = estado["puntos_pincel"][-1]
@@ -236,13 +296,7 @@ def main():
                                                   fill=_hex(COLOR_BORDE), width=max(2, int(r*0.5))))
             estado["puntos_pincel"].append((ev.x, ev.y))
         else:
-            limpiar_preview()
-            ix, iy = estado["ini"]
-            x0, x1 = sorted((ix, ev.x)); y0, y1 = sorted((iy, ev.y))
-            if estado["modo"] == "ovalo":
-                preview_ids.append(canvas.create_oval(x0, y0, x1, y1, outline=_hex(COLOR_BORDE), width=2))
-            else:
-                preview_ids.append(canvas.create_rectangle(x0, y0, x1, y1, outline=_hex(COLOR_BORDE), width=2))
+            dibujar_preview_caja(ev.x, ev.y)
 
     def soltar(ev):
         if not estado["arrastrando"]:
@@ -257,7 +311,10 @@ def main():
             x0, x1 = sorted((ix, ev.x)); y0, y1 = sorted((iy, ev.y))
             if (x1-x0) >= 6 and (y1-y0) >= 6:
                 rx0, ry0 = a_real(x0, y0); rx1, ry1 = a_real(x1, y1)
-                marcas.append({"tipo": estado["modo"], "caja": (rx0, ry0, rx1, ry1)})
+                mk = {"tipo": estado["modo"], "caja": (rx0, ry0, rx1, ry1)}
+                if estado["modo"] == "redondeado":
+                    mk["radio_pct"] = estado["radio_pct"]
+                marcas.append(mk)
         limpiar_preview()
         render_fondo()
 
@@ -266,8 +323,22 @@ def main():
         if marcas: marcas.pop(); render_fondo()
     def borrar(ev=None):
         marcas.clear(); limpiar_preview(); render_fondo()
-    def mas(ev=None): estado["pincel"] = min(estado["pincel"]+5, 200); actualizar_barra()
-    def menos(ev=None): estado["pincel"] = max(estado["pincel"]-5, 4); actualizar_barra()
+
+    def cambiar_radio(delta):
+        estado["radio_pct"] = max(0, min(100, estado["radio_pct"] + delta))
+        actualizar_barra()
+        # si estas arrastrando, el contorno se actualiza en vivo
+        if estado["arrastrando"] and estado["ultimo"]:
+            dibujar_preview_caja(*estado["ultimo"])
+
+    def mas(ev=None):
+        if estado["modo"] == "redondeado":
+            cambiar_radio(+RADIO_PCT_PASO); return
+        estado["pincel"] = min(estado["pincel"]+5, 200); actualizar_barra()
+    def menos(ev=None):
+        if estado["modo"] == "redondeado":
+            cambiar_radio(-RADIO_PCT_PASO); return
+        estado["pincel"] = max(estado["pincel"]-5, 4); actualizar_barra()
     def guardar(ev=None):
         if not marcas:
             messagebox.showwarning("Nada marcado", "Marca al menos una zona antes de guardar.")
@@ -315,8 +386,10 @@ def main():
     canvas.bind("<ButtonRelease-1>", soltar)
     for k in ("o","O"): root.bind(k, lambda e: set_modo("ovalo"))
     for k in ("r","R"): root.bind(k, lambda e: set_modo("rectangulo"))
+    for k in ("c","C"): root.bind(k, lambda e: set_modo("redondeado"))
     for k in ("p","P"): root.bind(k, lambda e: set_modo("pincel"))
     root.bind("<plus>", mas); root.bind("<equal>", mas); root.bind("<minus>", menos)
+    root.bind("<KP_Add>", mas); root.bind("<KP_Subtract>", menos)
     for k in ("z","Z"): root.bind(k, deshacer)
     for k in ("b","B"): root.bind(k, borrar)
     for k in ("g","G"): root.bind(k, guardar)
